@@ -1,0 +1,136 @@
+trigger:
+  - main
+  - dev
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - name: backendImageRepository
+    value: 'solanadcamonitor/api'
+  - name: frontendImageRepository
+    value: 'solanadcamonitor/webapp'
+  - name: buildConfiguration
+    value: 'Release'
+  - name: pythonVersion
+    value: '3.12'
+  - name: nodeVersion
+    value: '20.x'
+
+stages:
+- stage: Test
+  displayName: 'Test'
+  jobs:
+  - job: BackendTests
+    displayName: 'Backend Tests'
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+        addToPath: true
+        
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov flake8
+      displayName: 'Install dependencies'
+      workingDirectory: 'backend'
+      
+    - script: |
+        flake8 .
+      displayName: 'Lint'
+      workingDirectory: 'backend'
+      
+    - script: |
+        pytest --cov=. --cov-report=xml
+      displayName: 'Run tests'
+      workingDirectory: 'backend'
+      
+    - task: PublishCodeCoverageResults@1
+      inputs:
+        codeCoverageTool: Cobertura
+        summaryFileLocation: '$(System.DefaultWorkingDirectory)/backend/coverage.xml'
+        
+  - job: FrontendTests
+    displayName: 'Frontend Tests'
+    steps:
+    - task: NodeTool@0
+      inputs:
+        versionSpec: '$(nodeVersion)'
+        
+    - script: |
+        corepack enable
+        pnpm install
+      displayName: 'Install dependencies'
+      workingDirectory: 'frontend'
+      
+    - script: |
+        pnpm lint
+      displayName: 'Lint'
+      workingDirectory: 'frontend'
+      
+    - script: |
+        pnpm test
+      displayName: 'Run tests'
+      workingDirectory: 'frontend'
+
+- stage: Build
+  displayName: 'Build'
+  dependsOn: Test
+  condition: succeeded()
+  jobs:
+  - job: BuildBackend
+    displayName: 'Build Backend'
+    steps:
+    - task: Docker@2
+      inputs:
+        containerRegistry: 'AzureContainerRegistry'
+        repository: '$(backendImageRepository)'
+        command: 'buildAndPush'
+        Dockerfile: 'backend/Dockerfile'
+        buildContext: 'backend'
+        tags: |
+          $(Build.BuildId)
+          latest
+          
+  - job: BuildFrontend
+    displayName: 'Build Frontend'
+    steps:
+    - task: Docker@2
+      inputs:
+        containerRegistry: 'AzureContainerRegistry'
+        repository: '$(frontendImageRepository)'
+        command: 'buildAndPush'
+        Dockerfile: 'frontend/Dockerfile'
+        buildContext: 'frontend'
+        tags: |
+          $(Build.BuildId)
+          latest
+
+- stage: Deploy
+  displayName: 'Deploy'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployToProduction
+    displayName: 'Deploy to Production'
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: 'AzureServiceConnection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az containerapp update \
+                  --name api \
+                  --resource-group solana-dca-monitor \
+                  --image $(backendImageRepository):$(Build.BuildId)
+                  
+                az containerapp update \
+                  --name webapp \
+                  --resource-group solana-dca-monitor \
+                  --image $(frontendImageRepository):$(Build.BuildId)

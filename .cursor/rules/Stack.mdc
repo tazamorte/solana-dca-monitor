@@ -1,0 +1,166 @@
+---
+description: Technical stack specification for Solana DCA Monitor
+globs: ["**/*.py", "**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"]
+alwaysApply: false
+---
+# Technical Stack Specification
+
+## Blockchain Layer
+
+### Solana RPC Node
+- **Type**: Self-hosted light node
+- **Infra**: Azure VM (B2s)
+- **Ports**: 
+  - 8899 (HTTP RPC)
+  - 8900 (WebSocket)
+- **Version**: Solana 1.16+
+
+**Implementation Rules**:
+1. All RPC calls MUST use connection pooling
+2. Transaction simulations REQUIRED before broadcast
+3. Rate limiting: 50 req/sec per IP (NGINX config)
+4. Caching layer for common queries (account info, etc.)
+
+```yaml
+# Example infrastructure-as-code snippet
+resources:
+  solana_node:
+    type: azure/virtual_machine
+    size: Standard_B2s
+    image: solana/validator:v1.16.0
+    ports:
+      - 8899:8899
+      - 8900:8900
+```
+
+## Backend Layer
+
+### Python API
+- **Framework**: FastAPI
+- **Database**: Azure SQL (Serverless)
+- **Cache**: Azure Redis (Basic tier)
+
+**Coding Standards**:
+```python
+# Transaction handling template
+async def send_transaction(instruction: Instruction):
+    try:
+        # 1. Get recent blockhash
+        blockhash = await client.get_latest_blockhash()
+        
+        # 2. Build and sign tx locally
+        tx = Transaction().add(instruction)
+        tx.sign(keypair)
+        
+        # 3. Simulate first!
+        sim_result = await client.simulate_transaction(tx)
+        if sim_result["err"]:
+            raise SimulationError(sim_result)
+            
+        # 4. Broadcast
+        tx_id = await client.send_transaction(tx)
+        return {"status": "success", "txId": tx_id}
+    
+    except RPCException as e:
+        log_analytics_error(e)
+        return {"status": "error", "message": str(e)}
+```
+
+## Frontend Layer
+
+### Next.js Application
+- **Hosting**: Azure Static Web Apps
+- **State**: Zustand + React Query
+- **UI**: shadcn/ui components
+
+**IDE Recommendations**:
+- VS Code with:
+  - ESLint (Airbnb config)
+  - Prettier (tailwind plugin)
+  - Solana extension pack
+- JetBrains Rider for C# (if needed)
+
+## DevOps
+
+### CI/CD Pipeline
+```mermaid
+graph LR
+    A[Git Push] --> B[Run Tests]
+    B --> C{Branch?}
+    C -- main --> D[Build Prod Image]
+    C -- dev --> E[Build Dev Image]
+    D --> F[Deploy to AKS]
+    E --> G[Deploy to Test]
+```
+
+**Mandatory Checks**:
+- Unit test coverage > 80%
+- Security scan (Snyk)
+- Load test (50 concurrent users)
+
+## Monitoring
+
+### Azure Dashboard
+- **Key Metrics**:
+  ```csv
+  Component,Metric,Threshold
+  RPC Node,CPU Usage,<70%
+  API,Latency 95p,<500ms
+  DB,Connections,<50
+  ```
+  
+- **Alert Channels**:
+  - Email (P0 alerts)
+  - Slack (P1/P2)
+  - SMS (P0 only)
+
+## Security Policies
+
+1. **Authentication**:
+   - JWT tokens REQUIRED for write operations
+   - API keys for read-only (rate limited)
+
+2. **Data Protection**:
+   - Encrypt secrets in Azure Key Vault
+   - TLS 1.3 REQUIRED for all endpoints
+
+3. **Audit**:
+   - Log all RPC calls (retain 90 days)
+   - Weekly vulnerability scans
+
+## IDE Configuration (All Developers)
+
+### VS Code Settings (`.vscode/settings.json`)
+```json
+{
+  "solana.validatorPath": "./target/release/solana-validator",
+  "editor.formatOnSave": true,
+  "eslint.rules.customizations": [
+    { "rule": "*", "severity": "warn" },
+    { "rule": "security/*", "severity": "error" }
+  ],
+  "solana.validatorArgs": [
+    "--rpc-port", "8899",
+    "--dynamic-port-range", "8000-8020",
+    "--private-rpc"
+  ]
+}
+```
+
+### Recommended Extensions
+- **Blockchain**:
+  - Solana Labs (official)
+  - Rust Analyzer
+- **Web**:
+  - Tailwind CSS IntelliSense
+  - Apollo GraphQL
+
+## Code Review Checklist
+
+For every PR:
+- [ ] RPC calls properly cached
+- [ ] Transaction simulations included
+- [ ] Error handling for RPC failures
+- [ ] Rate limiting headers present
+- [ ] Secrets not hardcoded
+- [ ] Azure resource tags applied
